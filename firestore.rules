@@ -1,0 +1,69 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() { return request.auth != null; }
+    function existing() { return resource.data; }
+    function incoming() { return request.resource.data; }
+
+    function isValidCategory(data) {
+      return data.keys().hasAll(['name', 'color', 'createdAt', 'ownerId']) &&
+             data.name is string && data.name.size() > 0 &&
+             data.color is string &&
+             data.createdAt is number &&
+             data.ownerId == request.auth.uid;
+    }
+
+    match /categorias/{categoryId} {
+      allow read: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isSignedIn() && isValidCategory(incoming());
+      allow update: if isSignedIn() && 
+                       existing().ownerId == request.auth.uid && 
+                       incoming().ownerId == existing().ownerId &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['name', 'color', 'parentId']); 
+      allow delete: if isSignedIn() && existing().ownerId == request.auth.uid;
+    }
+
+    function isValidRule(data) {
+      return data.keys().hasAll(['title', 'categoryId', 'categoryName', 'updatedAt', 'ownerId']) &&
+             data.title is string && data.title.size() > 0 &&
+             data.categoryId is string &&
+             data.categoryName is string &&
+             data.updatedAt is number &&
+             data.ownerId == request.auth.uid;
+    }
+
+    match /regras/{ruleId} {
+      allow read: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isSignedIn() && isValidRule(incoming());
+      // No updates needed specifically yet, but just in case:
+      allow update: if isSignedIn() && 
+                       existing().ownerId == request.auth.uid && 
+                       incoming().ownerId == existing().ownerId &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['categoryId', 'categoryName', 'updatedAt']);
+      allow delete: if isSignedIn() && existing().ownerId == request.auth.uid;
+    }
+
+    function isValidInvoice(data) {
+      return data.keys().hasAll(['fileName', 'uploadDate', 'totalTransactions', 'transactions', 'ownerId']) &&
+             data.fileName is string &&
+             data.uploadDate is number &&
+             data.totalTransactions is number &&
+             data.transactions is list &&
+             data.ownerId == request.auth.uid;
+    }
+
+    match /faturas/{invoiceId} {
+      allow read: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isSignedIn() && isValidInvoice(incoming());
+      allow update: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow delete: if isSignedIn() && existing().ownerId == request.auth.uid;
+    }
+  }
+}

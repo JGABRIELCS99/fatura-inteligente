@@ -1,0 +1,60 @@
+{
+  "entities": {
+    "Category": {
+      "title": "Category",
+      "description": "Category for transactions",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "color": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "ownerId": { "type": "string" },
+        "parentId": { "type": "string" }
+      },
+      "required": ["name", "color", "createdAt", "ownerId"]
+    },
+    "Rule": {
+      "title": "Rule",
+      "description": "Categorization rules",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "categoryId": { "type": "string" },
+        "categoryName": { "type": "string" },
+        "updatedAt": { "type": "number" },
+        "ownerId": { "type": "string" }
+      },
+      "required": ["title", "categoryId", "categoryName", "updatedAt", "ownerId"]
+    },
+    "Invoice": {
+      "title": "Invoice",
+      "description": "Uploaded invoice data containing transactions",
+      "type": "object",
+      "properties": {
+        "fileName": { "type": "string" },
+        "uploadDate": { "type": "number" },
+        "totalTransactions": { "type": "number" },
+        "ownerId": { "type": "string" },
+        "transactions": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      },
+      "required": ["fileName", "uploadDate", "totalTransactions", "ownerId", "transactions"]
+    }
+  },
+  "firestore": {
+    "/categorias/{categoryId}": {
+      "schema": { "$ref": "#/entities/Category" },
+      "description": "Global or per-user categories."
+    },
+    "/regras/{ruleId}": {
+      "schema": { "$ref": "#/entities/Rule" },
+      "description": "Categorization rules mapping titles to categories."
+    },
+    "/faturas/{invoiceId}": {
+      "schema": { "$ref": "#/entities/Invoice" },
+      "description": "Stored invoices and their transactions."
+    }
+  }
+}

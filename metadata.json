@@ -1,0 +1,6 @@
+{
+  "name": "Classificador de Despesas",
+  "description": "Importe faturas e classifique despesas automaticamente por meio de inteligência artificial ou regras personalizadas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
