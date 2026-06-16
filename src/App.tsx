@@ -1,7 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { dbHelpers } from './lib/db';
-import { auth } from './lib/firebase';
-import { onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
+import { dbHelpers, customAuth } from './lib/db';
 import { Category, Rule, Transaction, Invoice } from './lib/types';
 import { FileUpload } from './components/FileUpload';
 import { Dashboard } from './components/Dashboard';
@@ -44,16 +42,15 @@ export default function App() {
   const [selectedMergeYear, setSelectedMergeYear] = useState(new Date().getFullYear());
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
-      if (currentUser || !dbHelpers) {
+    const checkUser = async () => {
+      setUser(customAuth.currentUser);
+      if (customAuth.currentUser) {
         await loadData();
       } else {
         setLoading(false);
       }
-    });
-
-    return () => unsubscribe();
+    };
+    checkUser();
   }, []);
 
   const loadData = async () => {
@@ -87,32 +84,25 @@ export default function App() {
       }
 
       if (isSignUp) {
-        await createUserWithEmailAndPassword(auth, email, password);
+        await customAuth.signUp(email, password);
       } else {
-        await signInWithEmailAndPassword(auth, email, password);
+        await customAuth.signIn(email, password);
       }
+      setUser(customAuth.currentUser);
+      await loadData();
     } catch (error: any) {
       console.error("Login erro:", error);
       
       const msg = error?.message || String(error);
-      if (error?.code === 'auth/invalid-credential' || error?.code === 'auth/user-not-found' || error?.code === 'auth/wrong-password') {
-         setAuthError("Email ou senha incorretos.");
-      } else if (error?.code === 'auth/email-already-in-use') {
-         setAuthError("Este email já está cadastrado.");
-      } else if (error?.code === 'auth/weak-password') {
-         setAuthError("A senha deve ter pelo menos 6 caracteres.");
-      } else if (error?.code === 'auth/invalid-email') {
-         setAuthError("O formato do email é inválido.");
-      } else {
-        setAuthError(`Erro no login: ${msg}`);
-      }
+      setAuthError(`${msg}`);
     } finally {
       setIsLoggingIn(false);
     }
   };
 
   const handleLogout = async () => {
-    await signOut(auth);
+    customAuth.signOut();
+    setUser(null);
     setCategories([]);
     setRules([]);
     setInvoices([]);

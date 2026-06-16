@@ -1,18 +1,67 @@
-import { db, auth } from './firebase';
+import { db } from './firebase';
 import { 
-  collection, getDocs, addDoc, updateDoc, deleteDoc, doc, setDoc, 
+  collection, getDocs, addDoc, updateDoc, deleteDoc, doc, setDoc, getDoc,
   query, orderBy, where, writeBatch
 } from 'firebase/firestore';
 import { Category, Rule, Invoice } from './types';
 
+let currentUserCache: { uid: string, email: string } | null = null;
+
+export const customAuth = {
+  get currentUser() {
+    if (currentUserCache) return currentUserCache;
+    const stored = localStorage.getItem('NEXUS_SAVED_USER');
+    if (stored) {
+      currentUserCache = JSON.parse(stored);
+      return currentUserCache;
+    }
+    return null;
+  },
+  
+  setUser(user: { uid: string, email: string } | null) {
+    currentUserCache = user;
+    if (user) {
+      localStorage.setItem('NEXUS_SAVED_USER', JSON.stringify(user));
+    } else {
+      localStorage.removeItem('NEXUS_SAVED_USER');
+    }
+  },
+
+  async signUp(email: string, pass: string) {
+    const emailLower = email.toLowerCase();
+    const userRef = doc(db, 'usuarios', emailLower);
+    const snap = await getDoc(userRef);
+    if (snap.exists()) {
+      throw new Error("Este email já está cadastrado.");
+    }
+    // Very basic pass storage for prototype bypass
+    await setDoc(userRef, { email: emailLower, pass });
+    this.setUser({ uid: emailLower, email: emailLower });
+  },
+
+  async signIn(email: string, pass: string) {
+    const emailLower = email.toLowerCase();
+    const userRef = doc(db, 'usuarios', emailLower);
+    const snap = await getDoc(userRef);
+    if (!snap.exists() || snap.data().pass !== pass) {
+      throw new Error("Email ou senha incorretos.");
+    }
+    this.setUser({ uid: emailLower, email: emailLower });
+  },
+
+  signOut() {
+    this.setUser(null);
+  }
+};
+
 export const dbHelpers = {
   // CATEGORIES
   async getCategories(): Promise<Category[]> {
-    if (!auth.currentUser) return [];
+    if (!customAuth.currentUser) return [];
     try {
       const q = query(
         collection(db, 'categorias'), 
-        where('ownerId', '==', auth.currentUser.uid),
+        where('ownerId', '==', customAuth.currentUser.uid),
         orderBy('createdAt', 'desc')
       );
       const snapshot = await getDocs(q);
@@ -35,7 +84,7 @@ export const dbHelpers = {
             name: cat.name, 
             color: cat.color, 
             createdAt: Date.now(), 
-            ownerId: auth.currentUser.uid 
+            ownerId: customAuth.currentUser.uid 
           };
           batch.set(docRef, fullCat);
           resolvedCats.push({ id: docRef.id, ...fullCat } as Category);
@@ -50,57 +99,58 @@ export const dbHelpers = {
     }
   },
   async addCategory(category: Omit<Category, 'id'>): Promise<Category> {
-    if (!auth.currentUser) throw new Error("Não autenticado");
-    const docRef = await addDoc(collection(db, 'categorias'), { ...category, ownerId: auth.currentUser.uid });
-    return { id: docRef.id, ...category, ownerId: auth.currentUser.uid } as Category;
+    if (!customAuth.currentUser) throw new Error("Não autenticado");
+    const docRef = await addDoc(collection(db, 'categorias'), { ...category, ownerId: customAuth.currentUser.uid });
+    return { id: docRef.id, ...category, ownerId: customAuth.currentUser.uid } as Category;
   },
   async updateCategory(id: string, category: Partial<Category>): Promise<void> {
-    if (!auth.currentUser) throw new Error("Não autenticado");
+    if (!customAuth.currentUser) throw new Error("Não autenticado");
     await updateDoc(doc(db, 'categorias', id), category);
   },
   async deleteCategory(id: string): Promise<void> {
-    if (!auth.currentUser) throw new Error("Não autenticado");
+    if (!customAuth.currentUser) throw new Error("Não autenticado");
     await deleteDoc(doc(db, 'categorias', id));
   },
 
   // RULES
   async getRules(): Promise<Rule[]> {
-    if (!auth.currentUser) return [];
-    const q = query(collection(db, 'regras'), where('ownerId', '==', auth.currentUser.uid));
+    if (!customAuth.currentUser) return [];
+    const q = query(collection(db, 'regras'), where('ownerId', '==', customAuth.currentUser.uid));
     const snapshot = await getDocs(q);
     return snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Rule));
   },
   async saveRule(title: string, categoryId: string, categoryName: string): Promise<void> {
-    if (!auth.currentUser) throw new Error("Não autenticado");
-    const docId = btoa(encodeURIComponent(title)) + '-' + auth.currentUser.uid;
+    if (!customAuth.currentUser) throw new Error("Não autenticado");
+    const docId = btoa(encodeURIComponent(title)) + '-' + customAuth.currentUser.uid;
     const rule = {
       title,
       categoryId,
       categoryName,
       updatedAt: Date.now(),
-      ownerId: auth.currentUser.uid
+      ownerId: customAuth.currentUser.uid
     };
     await setDoc(doc(db, 'regras', docId), rule);
   },
 
   // INVOICES
   async getInvoices(): Promise<Invoice[]> {
-    if (!auth.currentUser) return [];
-    const q = query(collection(db, 'faturas'), where('ownerId', '==', auth.currentUser.uid), orderBy('uploadDate', 'desc'));
+    if (!customAuth.currentUser) return [];
+    const q = query(collection(db, 'faturas'), where('ownerId', '==', customAuth.currentUser.uid), orderBy('uploadDate', 'desc'));
     const snapshot = await getDocs(q);
     return snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Invoice));
   },
   async saveInvoice(invoice: Omit<Invoice, 'id'>): Promise<Invoice> {
-    if (!auth.currentUser) throw new Error("Não autenticado");
-    const docRef = await addDoc(collection(db, 'faturas'), { ...invoice, ownerId: auth.currentUser.uid });
-    return { id: docRef.id, ...invoice, ownerId: auth.currentUser.uid } as Invoice;
+    if (!customAuth.currentUser) throw new Error("Não autenticado");
+    const docRef = await addDoc(collection(db, 'faturas'), { ...invoice, ownerId: customAuth.currentUser.uid });
+    return { id: docRef.id, ...invoice, ownerId: customAuth.currentUser.uid } as Invoice;
   },
   async updateInvoice(id: string, invoice: Partial<Invoice>): Promise<void> {
-    if (!auth.currentUser) throw new Error("Não autenticado");
+    if (!customAuth.currentUser) throw new Error("Não autenticado");
     await updateDoc(doc(db, 'faturas', id), invoice);
   },
   async deleteInvoice(id: string): Promise<void> {
-    if (!auth.currentUser) throw new Error("Não autenticado");
+    if (!customAuth.currentUser) throw new Error("Não autenticado");
     await deleteDoc(doc(db, 'faturas', id));
   }
 };
+
