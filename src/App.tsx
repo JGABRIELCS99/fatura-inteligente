@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { dbHelpers } from './lib/db';
-import { auth } from './lib/firebase';
+import { auth, isUsingCustomFirebase, saveCustomFirebaseConfig } from './lib/firebase';
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
 import { Category, Rule, Transaction, Invoice } from './lib/types';
 import { FileUpload } from './components/FileUpload';
@@ -8,8 +8,10 @@ import { Dashboard } from './components/Dashboard';
 import { GlobalDashboard } from './components/GlobalDashboard';
 import { TransactionList } from './components/TransactionList';
 import { CategoryManager } from './components/CategoryManager';
-import { Download, History, Tag, FileText, ChevronLeft, LayoutDashboard, CreditCard, Trash2, LogOut, BarChart2, Plus } from 'lucide-react';
+import { Download, History, Tag, FileText, ChevronLeft, LayoutDashboard, CreditCard, Trash2, LogOut, BarChart2, Plus, CheckSquare, Square, FileStack } from 'lucide-react';
 import Papa from 'papaparse';
+import { jsPDF } from 'jspdf';
+import { formatCurrency } from './lib/utils';
 
 export default function App() {
   const [categories, setCategories] = useState<Category[]>([]);
@@ -25,6 +27,45 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<any>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  // States for merging invoices
+  const [isSelectingForMerge, setIsSelectingForMerge] = useState(false);
+  const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<string[]>([]);
+  const [showMergeModal, setShowMergeModal] = useState(false);
+  const [mergeName, setMergeName] = useState('');
+  const [mergeDateOption, setMergeDateOption] = useState<'keep' | 'adjust'>('keep');
+  const [selectedMergeMonth, setSelectedMergeMonth] = useState(new Date().getMonth() + 1);
+  const [selectedMergeYear, setSelectedMergeYear] = useState(new Date().getFullYear());
+
+  // Firebase custom setup states (especially useful on Netlify)
+  const [showFirebaseSettings, setShowFirebaseSettings] = useState(false);
+  const [customApiKey, setCustomApiKey] = useState('');
+  const [customAuthDomain, setCustomAuthDomain] = useState('');
+  const [customProjectId, setCustomProjectId] = useState('');
+  const [customStorageBucket, setCustomStorageBucket] = useState('');
+  const [customMessagingSenderId, setCustomMessagingSenderId] = useState('');
+  const [customAppId, setCustomAppId] = useState('');
+  const [customFirebaseJson, setCustomFirebaseJson] = useState('');
+  const [customFbError, setCustomFbError] = useState<string | null>(null);
+  const [usingCustomFb, setUsingCustomFb] = useState(isUsingCustomFirebase());
+
+  useEffect(() => {
+    try {
+      const customConfigStr = localStorage.getItem('NEXUS_CUSTOM_FIREBASE_CONFIG');
+      if (customConfigStr) {
+        const customConfig = JSON.parse(customConfigStr);
+        setCustomApiKey(customConfig.apiKey || '');
+        setCustomAuthDomain(customConfig.authDomain || '');
+        setCustomProjectId(customConfig.projectId || '');
+        setCustomStorageBucket(customConfig.storageBucket || '');
+        setCustomMessagingSenderId(customConfig.messagingSenderId || '');
+        setCustomAppId(customConfig.appId || '');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
@@ -51,12 +92,31 @@ export default function App() {
   };
 
   const handleLogin = async () => {
+    setAuthError(null);
     try {
       const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
       await signInWithPopup(auth, provider);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Login erro:", error);
-      showToast("Erro ao fazer login.");
+      
+      // Ignore errors when user simply closes the popup or cancels
+      if (error?.code === 'auth/popup-closed-by-user' || error?.code === 'auth/cancelled-popup-request') {
+        return; // Just return, no need to show an error message
+      }
+
+      if (error && (error.code === 'auth/unauthorized-domain' || (error.message && error.message.includes('unauthorized')))) {
+        setAuthError(
+          `Domínio Não Autorizado (${window.location.hostname}). Adicione este endereço no Console do Firebase > Auth > Configurações > Domínios Autorizados.`
+        );
+      } else {
+        const msg = error?.message || String(error);
+        if (msg.includes('popup-blocked')) {
+          setAuthError("O navegador bloqueou o popup de login. Por favor, libere popups para este site e tente novamente.");
+        } else {
+          setAuthError(`Erro no login: ${msg}`);
+        }
+      }
     }
   };
 
@@ -67,6 +127,76 @@ export default function App() {
     setInvoices([]);
     setActiveInvoice(null);
     setViewMode('upload');
+  };
+
+  const handleParseFirebaseJson = (json: string) => {
+    setCustomFirebaseJson(json);
+    setCustomFbError(null);
+    if (!json.trim()) return;
+    try {
+      let cleaned = json.trim();
+      if (cleaned.includes('firebaseConfig = {') || cleaned.includes('{')) {
+        const firstBrace = cleaned.indexOf('{');
+        const lastBrace = cleaned.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1) {
+          cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+        }
+      }
+      
+      let parsedObj: any;
+      try {
+        parsedObj = JSON.parse(cleaned);
+      } catch (jsonErr) {
+        const fixedJson = cleaned
+          .replace(/'/g, '"')
+          .replace(/([a-zA-Z0-9_]+)\s*:/g, '"$1":')
+          .replace(/,\s*([}\]])/g, '$1');
+        parsedObj = JSON.parse(fixedJson);
+      }
+
+      if (parsedObj) {
+        if (parsedObj.apiKey) setCustomApiKey(parsedObj.apiKey);
+        if (parsedObj.authDomain) setCustomAuthDomain(parsedObj.authDomain);
+        if (parsedObj.projectId) setCustomProjectId(parsedObj.projectId);
+        if (parsedObj.storageBucket) setCustomStorageBucket(parsedObj.storageBucket);
+        if (parsedObj.messagingSenderId) setCustomMessagingSenderId(parsedObj.messagingSenderId);
+        if (parsedObj.appId) setCustomAppId(parsedObj.appId);
+        showToast("Configurações importadas!");
+      }
+    } catch (e) {
+      setCustomFbError("Formato inválido. Certifique-se de colar o bloco de configuração válido { apiKey: ... } ou digite manualmente.");
+    }
+  };
+
+  const handleSaveCustomFirebase = () => {
+    setCustomFbError(null);
+    if (!customApiKey.trim() || !customProjectId.trim()) {
+      setCustomFbError("Os campos API Key e Project ID são obrigatórios para inicializar o Firebase.");
+      return;
+    }
+
+    const config = {
+      apiKey: customApiKey.trim(),
+      authDomain: customAuthDomain.trim(),
+      projectId: customProjectId.trim(),
+      storageBucket: customStorageBucket.trim(),
+      messagingSenderId: customMessagingSenderId.trim(),
+      appId: customAppId.trim()
+    };
+
+    saveCustomFirebaseConfig(config);
+    showToast("Firebase Configurado! Reiniciando aplicação...");
+    setTimeout(() => {
+      window.location.reload();
+    }, 1200);
+  };
+
+  const handleResetFirebase = () => {
+    saveCustomFirebaseConfig(null);
+    showToast("Restaurando configuração nativa... Aguarde.");
+    setTimeout(() => {
+      window.location.reload();
+    }, 1200);
   };
 
   const showToast = (msg: string) => {
@@ -196,6 +326,251 @@ export default function App() {
     document.body.removeChild(link);
   };
 
+  const handleExportPDF = () => {
+    if (!activeInvoice) return;
+
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
+
+    const primaryColor = [138, 5, 190]; // Purple #8A05BE
+    const darkTextColor = [31, 41, 55]; // Gray 800
+    const grayText = [107, 114, 128]; // Gray 500
+
+    // Relatório Header Custom Design
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(22);
+    doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+    doc.text('Relatório de Despesas', 14, 20);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(grayText[0], grayText[1], grayText[2]);
+    doc.text(`Fatura: ${activeInvoice.fileName}`, 14, 27);
+    doc.text(`Gerado em: ${new Date().toLocaleDateString('pt-BR')} às ${new Date().toLocaleTimeString('pt-BR')}`, 14, 32);
+
+    // Separator
+    doc.setDrawColor(229, 231, 235);
+    doc.setLineWidth(0.4);
+    doc.line(14, 36, 196, 36);
+
+    // Only compute expenses (amount > 0)
+    const expenses = activeInvoice.transactions.filter(t => t.amount > 0);
+    const totalExpenses = expenses.reduce((sum, t) => sum + t.amount, 0);
+
+    // Highlight Box for Total Spendings
+    doc.setFillColor(249, 250, 251); // Soft grey bg
+    doc.rect(14, 40, 182, 22, 'F');
+    doc.setDrawColor(229, 231, 235);
+    doc.rect(14, 40, 182, 22, 'S');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(grayText[0], grayText[1], grayText[2]);
+    doc.text('TOTAL DE GASTOS POR CATEGORIAS', 20, 47);
+
+    doc.setFontSize(18);
+    doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+    doc.text(formatCurrency(totalExpenses), 20, 56);
+
+    doc.setFontSize(9.5);
+    doc.setTextColor(grayText[0], grayText[1], grayText[2]);
+    doc.text(`${expenses.length} transações analisadas`, 130, 55);
+
+    // Compute Category Totals
+    const groupedData = expenses.reduce((acc, curr) => {
+      const cat = categories.find(c => c.id === curr.categoryId);
+      const parentId = cat?.parentId || cat?.id || 'unknown';
+      const parentCat = categories.find(c => c.id === parentId);
+      const mainName = parentCat?.name || 'Outros';
+      
+      if (!acc[mainName]) {
+        acc[mainName] = { total: 0, sub: {} };
+      }
+      acc[mainName].total += curr.amount;
+      
+      const subName = cat?.name || mainName;
+      acc[mainName].sub[subName] = (acc[mainName].sub[subName] || 0) + curr.amount;
+      
+      return acc;
+    }, {} as Record<string, { total: number, sub: Record<string, number> }>);
+
+    const sortedCategories = (Object.entries(groupedData) as [string, { total: number, sub: Record<string, number> }][])
+      .filter(([_, data]) => data.total > 0)
+      .map(([name, data]) => ({
+        name,
+        total: data.total,
+        subcategories: (Object.entries(data.sub) as [string, number][]).map(([subName, val]) => ({ name: subName, value: val })).sort((a, b) => b.value - a.value)
+      }))
+      .sort((a, b) => b.total - a.total);
+
+    // Draw categories table headers
+    let y = 70;
+    doc.setFillColor(138, 5, 190); // primary category header style
+    doc.rect(14, y, 182, 8, 'F');
+    
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(255, 255, 255);
+    doc.text('Categoria / Subcategoria', 18, y + 5.5);
+    doc.text('Total Gasto', 125, y + 5.5);
+    doc.text('Participação (%)', 162, y + 5.5);
+
+    y += 8;
+
+    sortedCategories.forEach((catInfo) => {
+      if (y > 265) {
+        doc.addPage();
+        y = 20;
+      }
+
+      // Group Row
+      doc.setFillColor(243, 244, 246);
+      doc.rect(14, y, 182, 8, 'F');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(darkTextColor[0], darkTextColor[1], darkTextColor[2]);
+      doc.text(catInfo.name, 18, y + 5.5);
+      
+      doc.text(formatCurrency(catInfo.total), 125, y + 5.5);
+
+      const percent = totalExpenses > 0 ? ((catInfo.total / totalExpenses) * 100).toFixed(1) : '0.0';
+      doc.text(`${percent}%`, 162, y + 5.5);
+
+      y += 8;
+
+      // Render Subcategories if custom/multiple exists
+      const hasSubs = catInfo.subcategories.length > 1 || (catInfo.subcategories.length === 1 && catInfo.subcategories[0].name !== catInfo.name);
+      
+      if (hasSubs) {
+        catInfo.subcategories.forEach((sub) => {
+          if (y > 270) {
+            doc.addPage();
+            y = 20;
+          }
+
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(9);
+          doc.setTextColor(100, 116, 139); // Gray
+          doc.text(`└  ${sub.name}`, 22, y + 5);
+
+          doc.text(formatCurrency(sub.value), 125, y + 5);
+
+          const subPct = catInfo.total > 0 ? ((sub.value / catInfo.total) * 100).toFixed(1) : '0.0';
+          doc.text(`${subPct}% da cat.`, 162, y + 5);
+
+          y += 7;
+        });
+      }
+
+      // Small vertical spacer
+      y += 2;
+    });
+
+    // Page decoration numbers
+    const pageCount = doc.getNumberOfPages();
+    for (let i = 1; i <= pageCount; i++) {
+      doc.setPage(i);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(156, 163, 175);
+      doc.text(`Página ${i} de ${pageCount}`, 14, 287);
+      doc.text('Nexus Faturas - Classificação Inteligente de Despesas', 120, 287);
+    }
+
+    doc.save(`relatorio_${activeInvoice.fileName.replace(/\.[^/.]+$/, "")}.pdf`);
+    showToast("Relatório PDF exportado com sucesso!");
+  };
+
+  const toggleInvoiceSelection = (id: string) => {
+    setSelectedInvoiceIds(prev => 
+      prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleOpenMergeModal = () => {
+    if (selectedInvoiceIds.length < 2) {
+      showToast("Selecione pelo menos duas faturas para mesclar.");
+      return;
+    }
+    const currentSelected = invoices.filter(inv => selectedInvoiceIds.includes(inv.id));
+    
+    // Guess default name based on first file name or current date
+    const dateStr = new Date().toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+    setMergeName(`Faturas Mescladas - ${dateStr.charAt(0).toUpperCase() + dateStr.slice(1)}`);
+    setMergeDateOption('keep');
+    setShowMergeModal(true);
+  };
+
+  const handleMergeInvoices = async () => {
+    if (!mergeName.trim()) {
+      alert("Por favor, digite um nome para a fatura mesclada.");
+      return;
+    }
+
+    setLoading(true);
+    setShowMergeModal(false);
+
+    try {
+      const selectedInvoices = invoices.filter(inv => selectedInvoiceIds.includes(inv.id));
+      const mergedTransactions: Transaction[] = [];
+
+      selectedInvoices.forEach(inv => {
+        inv.transactions.forEach(t => {
+          let updatedDate = t.date;
+          if (mergeDateOption === 'adjust') {
+            const dmRef = t.date.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+            if (dmRef) {
+              const day = dmRef[1].padStart(2, '0');
+              const month = String(selectedMergeMonth).padStart(2, '0');
+              updatedDate = `${day}/${month}/${selectedMergeYear}`;
+            } else {
+              const dayOnlyMatch = t.date.match(/^(\d{1,2})\b/);
+              if (dayOnlyMatch) {
+                const day = dayOnlyMatch[1].padStart(2, '0');
+                const month = String(selectedMergeMonth).padStart(2, '0');
+                updatedDate = `${day}/${month}/${selectedMergeYear}`;
+              } else {
+                const month = String(selectedMergeMonth).padStart(2, '0');
+                updatedDate = `01/${month}/${selectedMergeYear}`;
+              }
+            }
+          }
+
+          mergedTransactions.push({
+            ...t,
+            id: `${inv.id}-${t.id}-${crypto.randomUUID().slice(0, 4)}`, // absolute uniqueness
+            date: updatedDate
+          });
+        });
+      });
+
+      const newInvoiceData: Omit<Invoice, 'id'> = {
+        fileName: mergeName.endsWith('.csv') ? mergeName : `${mergeName}.csv`,
+        uploadDate: Date.now(),
+        totalTransactions: mergedTransactions.length,
+        transactions: mergedTransactions
+      };
+
+      const savedInvoice = await dbHelpers.saveInvoice(newInvoiceData);
+      
+      setInvoices([savedInvoice, ...invoices]);
+      setActiveInvoice(savedInvoice);
+      setIsSelectingForMerge(false);
+      setSelectedInvoiceIds([]);
+      setViewMode('invoice');
+      showToast(`Faturas mescladas com sucesso em "${savedInvoice.fileName}"!`);
+    } catch (error) {
+      console.error("Erro ao mesclar faturas:", error);
+      showToast("Não foi possível mesclar as faturas.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleDeleteInvoice = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!window.confirm("Deseja realmente apagar esta fatura do histórico?")) return;
@@ -223,10 +598,124 @@ export default function App() {
           <p className="text-gray-400 text-center mb-8">Faça login para gerenciar e classificar suas faturas utilizando inteligência.</p>
           <button 
             onClick={handleLogin}
-            className="w-full py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-medium transition-colors"
+            className="w-full py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-medium transition-colors cursor-pointer"
           >
             Entrar com Google
           </button>
+          {authError && (
+            <div className="mt-6 p-4 rounded-xl bg-red-950/40 border border-red-900/60 text-red-200 text-xs leading-relaxed">
+              <p className="font-semibold text-red-400 mb-1">⚠️ Status da Autenticação:</p>
+              <p>{authError}</p>
+              {authError.includes("Domínio Não Autorizado") && (
+                <div className="mt-3 text-[11px] text-gray-400 space-y-1.5 pt-2 border-t border-red-900/40">
+                  <p className="text-red-300 font-semibold">Como resolver em 1 minuto:</p>
+                  <ol className="list-decimal pl-4 space-y-1">
+                    <li>Acesse o <a href="https://console.firebase.google.com/" target="_blank" rel="noopener noreferrer" className="text-purple-400 underline hover:text-purple-300">Console do Firebase</a> de seu projeto.</li>
+                    <li>No menu, clique em <strong>Authentication</strong>.</li>
+                    <li>Acesse a aba <strong>Settings</strong> (Configurações).</li>
+                    <li>Selecione <strong>Authorized domains</strong> (Domínios autorizados) no painel lateral/central.</li>
+                    <li>Clique em <strong>Add domain</strong> (Adicionar domínio) e insira: <code className="bg-gray-950 px-1 py-0.5 rounded text-red-300 font-mono select-all">{window.location.hostname}</code></li>
+                  </ol>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Custom Firebase Settings Toggle */}
+          <div className="w-full mt-6 pt-6 border-t border-gray-800 flex flex-col items-center">
+            {usingCustomFb ? (
+              <div className="bg-purple-950/25 border border-purple-500/25 p-4 rounded-xl w-full text-center mb-1">
+                <p className="text-xs text-purple-300 font-semibold mb-1">🔥 Firebase Personalizado Ativo</p>
+                <p className="text-[11px] text-gray-400">Você está usando suas próprias credenciais do Firebase.</p>
+                <button
+                  onClick={handleResetFirebase}
+                  className="mt-3 text-xs text-red-400 hover:text-red-300 underline font-medium cursor-pointer bg-transparent border-none p-0"
+                >
+                  Restaurar Original / Padrão
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowFirebaseSettings(!showFirebaseSettings)}
+                className="text-xs text-gray-500 hover:text-purple-400 transition-colors flex items-center gap-1.5 cursor-pointer font-medium bg-transparent border-none p-0"
+              >
+                <FileStack className="w-3.5 h-3.5 text-purple-500" />
+                Configurar meu próprio Firebase (Avançado / Netlify)
+              </button>
+            )}
+
+            {showFirebaseSettings && !usingCustomFb && (
+              <div className="w-full mt-4 p-4 rounded-xl bg-gray-950 border border-gray-800 text-left space-y-4 animate-in slide-in-from-top-4 duration-200">
+                <div>
+                  <h4 className="text-xs font-bold text-gray-300 uppercase tracking-wider">Firebase Próprio</h4>
+                  <p className="text-[10px] text-gray-500 mt-1">
+                    Útil se você publicou o app no seu Netlify e não tem permissões no projeto Firebase gerado pelo AI Studio para adicionar o domínio.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="block text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Colar bloco de código JSON do Config:</label>
+                  <textarea
+                    rows={4}
+                    value={customFirebaseJson}
+                    onChange={(e) => handleParseFirebaseJson(e.target.value)}
+                    placeholder={`const firebaseConfig = {\n  apiKey: "AIzaSy...",\n  authDomain: "...",\n  projectId: "..."\n};`}
+                    className="w-full bg-gray-900 border border-gray-800 rounded-lg p-2 text-xs font-mono text-gray-300 focus:outline-none focus:ring-1 focus:ring-purple-600 focus:border-transparent"
+                  />
+                  <p className="text-[9px] text-gray-500">Cole o código do Firebase Console para preencher tudo automaticamente.</p>
+                </div>
+
+                {customFbError && (
+                  <p className="text-[10px] text-red-400 leading-relaxed font-medium bg-red-950/20 p-2 rounded border border-red-900/30">{customFbError}</p>
+                )}
+
+                <div className="grid grid-cols-2 gap-2 text-left">
+                  <div className="col-span-2">
+                    <label className="block text-[9px] font-semibold text-gray-500 uppercase">API Key *</label>
+                    <input
+                      type="text"
+                      value={customApiKey}
+                      onChange={(e) => setCustomApiKey(e.target.value)}
+                      className="w-full bg-gray-900 border border-gray-800 rounded-lg py-1 px-2 text-xs text-gray-300 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[9px] font-semibold text-gray-500 uppercase">Project ID *</label>
+                    <input
+                      type="text"
+                      value={customProjectId}
+                      onChange={(e) => setCustomProjectId(e.target.value)}
+                      className="w-full bg-gray-900 border border-gray-800 rounded-lg py-1 px-2 text-xs text-gray-300 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[9px] font-semibold text-gray-500 uppercase">Auth Domain</label>
+                    <input
+                      type="text"
+                      value={customAuthDomain}
+                      onChange={(e) => setCustomAuthDomain(e.target.value)}
+                      className="w-full bg-gray-900 border border-gray-800 rounded-lg py-1 px-2 text-xs text-gray-300 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-2 pt-1">
+                  <button
+                    onClick={() => setShowFirebaseSettings(false)}
+                    className="w-1/2 py-2 bg-gray-900 hover:bg-gray-800 text-gray-455 rounded-lg text-xs font-medium cursor-pointer border-none"
+                  >
+                    Fechar
+                  </button>
+                  <button
+                    onClick={handleSaveCustomFirebase}
+                    className="w-1/2 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-medium cursor-pointer border-none shadow-md"
+                  >
+                    Salvar e Reiniciar
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -252,6 +741,145 @@ export default function App() {
           onDelete={handleDeleteCategory}
           onClose={() => setShowCatManager(false)}
         />
+      )}
+
+      {/* Merge Invoices Modal */}
+      {showMergeModal && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+          <div className="bg-gray-900 border border-gray-800 w-full max-w-lg rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="p-6 border-b border-gray-800 flex items-center justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-lg bg-purple-600/10 border border-purple-500/20 flex items-center justify-center">
+                  <FileStack className="w-5 h-5 text-purple-400" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-lg text-white">Mesclar Faturas</h3>
+                  <p className="text-xs text-gray-400">Unir {selectedInvoiceIds.length} faturas em uma única</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowMergeModal(false)}
+                className="text-gray-400 hover:text-white transition-colors cursor-pointer text-xl"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-5 custom-scrollbar text-left text-gray-200">
+              <div>
+                <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Faturas Selecionadas:</label>
+                <div className="p-3 rounded-lg bg-gray-950 border border-gray-850 space-y-1.5 max-h-24 overflow-y-auto custom-scrollbar">
+                  {invoices.filter(inv => selectedInvoiceIds.includes(inv.id)).map((inv, i) => (
+                    <div key={i} className="text-xs text-gray-300 flex items-center">
+                      <span className="w-1.5 h-1.5 bg-purple-500 rounded-full mr-2"></span>
+                      <span className="truncate">{inv.fileName}</span>
+                      <span className="text-[10px] text-gray-500 ml-auto mr-1">({inv.totalTransactions} transações)</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Nome da nova fatura mesclada:</label>
+                <input 
+                  type="text" 
+                  value={mergeName}
+                  onChange={(e) => setMergeName(e.target.value)}
+                  placeholder="Ex: Faturas Mescladas - Junho 2026"
+                  className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-gray-200 focus:outline-none focus:ring-2 focus:ring-purple-650 focus:border-transparent transition-all"
+                />
+              </div>
+
+              <div className="space-y-3">
+                <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider">Ajuste de datas das transações:</label>
+                
+                <label className="flex items-start p-3 rounded-xl border border-gray-850 hover:bg-gray-800/10 cursor-pointer transition-all">
+                  <input 
+                    type="radio" 
+                    name="dateOption" 
+                    checked={mergeDateOption === 'keep'}
+                    onChange={() => setMergeDateOption('keep')}
+                    className="mt-1 mr-3 accent-purple-600"
+                  />
+                  <div>
+                    <p className="text-sm font-medium text-gray-100">Manter datas originais</p>
+                    <p className="text-xs text-gray-500 mt-0.5">As transações preservarão seus dias, meses e anos originais.</p>
+                  </div>
+                </label>
+
+                <label className="flex items-start p-3 rounded-xl border border-gray-850 hover:bg-gray-800/10 cursor-pointer transition-all">
+                  <input 
+                    type="radio" 
+                    name="dateOption" 
+                    checked={mergeDateOption === 'adjust'}
+                    onChange={() => setMergeDateOption('adjust')}
+                    className="mt-1 mr-3 accent-purple-600"
+                  />
+                  <div>
+                    <p className="text-sm font-medium text-gray-100">Ajustar todas para o mesmo mês</p>
+                    <p className="text-xs text-gray-500 mt-0.5">Corrige e força todas as transações para o mês e ano escolhidos abaixo, mantendo os dias originais.</p>
+                  </div>
+                </label>
+              </div>
+
+              {mergeDateOption === 'adjust' && (
+                <div className="grid grid-cols-2 gap-4 pt-2 animate-in slide-in-from-top-4 duration-200 text-left">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Mês de Destino:</label>
+                    <select
+                      value={selectedMergeMonth}
+                      onChange={(e) => setSelectedMergeMonth(Number(e.target.value))}
+                      className="w-full bg-gray-950 border border-gray-850 rounded-xl px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-2 focus:ring-purple-600"
+                    >
+                      <option value="1">Janeiro</option>
+                      <option value="2">Fevereiro</option>
+                      <option value="3">Março</option>
+                      <option value="4">Abril</option>
+                      <option value="5">Maio</option>
+                      <option value="6">Junho</option>
+                      <option value="7">Julho</option>
+                      <option value="8">Agosto</option>
+                      <option value="9">Setembro</option>
+                      <option value="10">Outubro</option>
+                      <option value="11">Novembro</option>
+                      <option value="12">Dezembro</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Ano de Destino:</label>
+                    <select
+                      value={selectedMergeYear}
+                      onChange={(e) => setSelectedMergeYear(Number(e.target.value))}
+                      className="w-full bg-gray-950 border border-gray-850 rounded-xl px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-2 focus:ring-purple-600"
+                    >
+                      {Array.from({ length: 11 }, (_, i) => 2020 + i).map(y => (
+                        <option key={y} value={y}>{y}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="p-6 border-t border-gray-800 bg-gray-950/40 flex items-center justify-end space-x-3">
+              <button
+                type="button"
+                onClick={() => setShowMergeModal(false)}
+                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-350 rounded-xl font-medium transition-colors cursor-pointer text-sm"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleMergeInvoices}
+                className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-medium transition-colors cursor-pointer text-sm flex items-center shadow-md border-none"
+              >
+                <FileStack className="w-4 h-4 mr-2" />
+                Mesclar e Visualizar
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Main Content */}
@@ -341,13 +969,22 @@ export default function App() {
                     {activeInvoice.fileName}
                   </h2>
                 </div>
-                <button 
-                  onClick={handleExportCSV}
-                  className="px-4 py-2 bg-gray-800 text-white rounded-lg font-medium hover:bg-gray-700 transition-colors flex items-center shadow-sm"
-                >
-                  <Download className="w-4 h-4 mr-2" />
-                  Exportar CSV
-                </button>
+                <div className="flex items-center gap-3">
+                  <button 
+                    onClick={handleExportPDF}
+                    className="px-4 py-2 bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700 transition-colors flex items-center shadow-md cursor-pointer text-sm"
+                  >
+                    <FileText className="w-4 h-4 mr-2" />
+                    Gerar PDF por Categoria
+                  </button>
+                  <button 
+                    onClick={handleExportCSV}
+                    className="px-4 py-2 bg-gray-800 text-white rounded-lg font-medium hover:bg-gray-700 transition-colors flex items-center shadow-sm cursor-pointer text-sm"
+                  >
+                    <Download className="w-4 h-4 mr-2" />
+                    Exportar CSV
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -371,8 +1008,48 @@ export default function App() {
           
           {viewMode === 'history' && (
              <div className="animate-in fade-in duration-300">
-                <div className="flex justify-between items-center mb-8">
-                  <h2 className="text-2xl font-bold">Histórico de Faturas</h2>
+                <div className="flex justify-between items-center mb-8 flex-wrap gap-4 text-left">
+                  <div>
+                    <h2 className="text-2xl font-bold">Histórico de Faturas</h2>
+                    <p className="text-gray-400 text-sm mt-1">Gerencie suas faturas importadas ou selecione-as para unir faturas do mesmo mês.</p>
+                  </div>
+                  {invoices.length > 1 && (
+                    <div className="flex items-center gap-3">
+                      {isSelectingForMerge ? (
+                        <>
+                          <button 
+                            onClick={() => {
+                              setIsSelectingForMerge(false);
+                              setSelectedInvoiceIds([]);
+                            }}
+                            className="px-4 py-2 bg-gray-850 hover:bg-gray-800 text-gray-300 rounded-lg transition-colors text-sm cursor-pointer border border-gray-800"
+                          >
+                            Cancelar Seleção
+                          </button>
+                          <button 
+                            onClick={handleOpenMergeModal}
+                            disabled={selectedInvoiceIds.length < 2}
+                            className={`px-4 py-2 rounded-lg font-semibold flex items-center text-sm transition-all border-none ${
+                              selectedInvoiceIds.length >= 2 
+                              ? 'bg-purple-600 hover:bg-purple-700 text-white cursor-pointer shadow-md' 
+                              : 'bg-purple-900/30 text-purple-400/50 cursor-not-allowed'
+                            }`}
+                          >
+                            <FileStack className="w-4 h-4 mr-2" />
+                            Mesclar Selecionadas ({selectedInvoiceIds.length})
+                          </button>
+                        </>
+                      ) : (
+                        <button 
+                          onClick={() => setIsSelectingForMerge(true)}
+                          className="px-4 py-2 bg-gray-800 text-white rounded-lg font-medium hover:bg-gray-700 transition-colors flex items-center shadow-sm cursor-pointer text-sm"
+                        >
+                          <FileStack className="w-4 h-4 mr-2 text-purple-400" />
+                          Unir Faturas do Mês
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
                 {invoices.length === 0 ? (
                   <div className="text-center py-20 bg-gray-900 rounded-2xl border border-gray-800">
@@ -380,34 +1057,58 @@ export default function App() {
                     <p className="text-gray-500">Nenhum histórico encontrado.</p>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {invoices.map((inv, idx) => (
-                      <div 
-                        key={`inv-${inv.id}-${idx}`} 
-                        className="bg-gray-900 border border-gray-800 hover:border-purple-500/50 p-6 rounded-2xl cursor-pointer hover:bg-gray-800/80 transition-all flex flex-col group"
-                        onClick={() => {
-                          setActiveInvoice(inv);
-                          setViewMode('invoice');
-                        }}
-                      >
-                        <div className="flex justify-between items-start mb-4">
-                          <FileText className="w-8 h-8 text-gray-600 group-hover:text-purple-400 transition-colors" />
-                          <button 
-                            onClick={(e) => handleDeleteInvoice(inv.id, e)}
-                            className="text-gray-600 hover:text-red-400 transition-colors p-1"
-                            title="Apagar fatura"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 text-left">
+                    {invoices.map((inv, idx) => {
+                      const isSelected = selectedInvoiceIds.includes(inv.id);
+                      return (
+                        <div 
+                          key={`inv-${inv.id}-${idx}`} 
+                          className={`relative p-6 rounded-2xl cursor-pointer hover:bg-gray-800/80 transition-all flex flex-col group border ${
+                            isSelected 
+                            ? 'bg-purple-950/10 border-purple-500 shadow-md shadow-purple-500/5' 
+                            : 'bg-gray-900 border-gray-800 hover:border-purple-500/30'
+                          }`}
+                          onClick={() => {
+                            if (isSelectingForMerge) {
+                              toggleInvoiceSelection(inv.id);
+                            } else {
+                              setActiveInvoice(inv);
+                              setViewMode('invoice');
+                            }
+                          }}
+                        >
+                          {isSelectingForMerge && (
+                            <div className="absolute top-4 right-4 z-10 p-1 bg-gray-950 rounded-lg border border-gray-800 shadow">
+                              {isSelected ? (
+                                <CheckSquare className="w-5 h-5 text-purple-500" />
+                              ) : (
+                                <Square className="w-5 h-5 text-gray-500 hover:text-purple-400 transition-colors" />
+                              )}
+                            </div>
+                          )}
+                          <div className="flex justify-between items-start mb-4">
+                            <FileText className="w-8 h-8 text-gray-600 group-hover:text-purple-400 transition-colors" />
+                            {!isSelectingForMerge && (
+                              <button 
+                                onClick={(e) => handleDeleteInvoice(inv.id, e)}
+                                className="text-gray-650 hover:text-red-400 transition-colors p-1"
+                                title="Apagar fatura"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+                          <h3 className="font-semibold text-gray-200 mb-1 truncate pr-8">{inv.fileName}</h3>
+                          <p className="text-sm text-gray-500 mb-4">{new Date(inv.uploadDate).toLocaleDateString('pt-BR')}</p>
+                          <div className="mt-auto pt-4 border-t border-gray-800 flex justify-between items-center text-sm">
+                             <span className="text-gray-400">{inv.totalTransactions} transações</span>
+                             <span className="text-purple-400 font-medium opacity-0 group-hover:opacity-100 transition-opacity">
+                               {isSelectingForMerge ? (isSelected ? 'Desmarcar' : 'Selecionar') : 'Acessar \u2192'}
+                             </span>
+                          </div>
                         </div>
-                        <h3 className="font-semibold text-gray-200 mb-1 truncate">{inv.fileName}</h3>
-                        <p className="text-sm text-gray-500 mb-4">{new Date(inv.uploadDate).toLocaleDateString('pt-BR')}</p>
-                        <div className="mt-auto pt-4 border-t border-gray-800 flex justify-between items-center text-sm">
-                           <span className="text-gray-400">{inv.totalTransactions} linhas</span>
-                           <span className="text-purple-400 font-medium opacity-0 group-hover:opacity-100 transition-opacity">Acessar &rarr;</span>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
              </div>
