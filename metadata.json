@@ -1,6 +1,8 @@
 {
   "name": "Classificador de Despesas",
-  "description": "Importe faturas e classifique despesas automaticamente por meio de inteligência artificial ou regras personalizadas.",
+  "description": "App para advogados importarem faturas.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

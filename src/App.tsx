@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { dbHelpers } from './lib/db';
-import { auth, isUsingCustomFirebase, saveCustomFirebaseConfig } from './lib/firebase';
-import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
+import { auth } from './lib/firebase';
+import { onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
 import { Category, Rule, Transaction, Invoice } from './lib/types';
 import { FileUpload } from './components/FileUpload';
 import { Dashboard } from './components/Dashboard';
@@ -28,6 +28,11 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<any>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isSignUp, setIsSignUp] = useState(false);
 
   // States for merging invoices
   const [isSelectingForMerge, setIsSelectingForMerge] = useState(false);
@@ -37,35 +42,6 @@ export default function App() {
   const [mergeDateOption, setMergeDateOption] = useState<'keep' | 'adjust'>('keep');
   const [selectedMergeMonth, setSelectedMergeMonth] = useState(new Date().getMonth() + 1);
   const [selectedMergeYear, setSelectedMergeYear] = useState(new Date().getFullYear());
-
-  // Firebase custom setup states (especially useful on Netlify)
-  const [showFirebaseSettings, setShowFirebaseSettings] = useState(false);
-  const [customApiKey, setCustomApiKey] = useState('');
-  const [customAuthDomain, setCustomAuthDomain] = useState('');
-  const [customProjectId, setCustomProjectId] = useState('');
-  const [customStorageBucket, setCustomStorageBucket] = useState('');
-  const [customMessagingSenderId, setCustomMessagingSenderId] = useState('');
-  const [customAppId, setCustomAppId] = useState('');
-  const [customFirebaseJson, setCustomFirebaseJson] = useState('');
-  const [customFbError, setCustomFbError] = useState<string | null>(null);
-  const [usingCustomFb, setUsingCustomFb] = useState(isUsingCustomFirebase());
-
-  useEffect(() => {
-    try {
-      const customConfigStr = localStorage.getItem('NEXUS_CUSTOM_FIREBASE_CONFIG');
-      if (customConfigStr) {
-        const customConfig = JSON.parse(customConfigStr);
-        setCustomApiKey(customConfig.apiKey || '');
-        setCustomAuthDomain(customConfig.authDomain || '');
-        setCustomProjectId(customConfig.projectId || '');
-        setCustomStorageBucket(customConfig.storageBucket || '');
-        setCustomMessagingSenderId(customConfig.messagingSenderId || '');
-        setCustomAppId(customConfig.appId || '');
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
@@ -91,32 +67,47 @@ export default function App() {
     setLoading(false);
   };
 
-  const handleLogin = async () => {
+  const handleLogin = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (isLoggingIn) return;
+    setIsLoggingIn(true);
     setAuthError(null);
+    
+    if (!email || !password) {
+      setAuthError("Por favor, preencha o email e a senha.");
+      setIsLoggingIn(false);
+      return;
+    }
+
     try {
-      const provider = new GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: 'select_account' });
-      await signInWithPopup(auth, provider);
+      if (password.length < 6) {
+         setAuthError("A senha deve ter pelo menos 6 caracteres.");
+         setIsLoggingIn(false);
+         return;
+      }
+
+      if (isSignUp) {
+        await createUserWithEmailAndPassword(auth, email, password);
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
     } catch (error: any) {
       console.error("Login erro:", error);
       
-      // Ignore errors when user simply closes the popup or cancels
-      if (error?.code === 'auth/popup-closed-by-user' || error?.code === 'auth/cancelled-popup-request') {
-        return; // Just return, no need to show an error message
-      }
-
-      if (error && (error.code === 'auth/unauthorized-domain' || (error.message && error.message.includes('unauthorized')))) {
-        setAuthError(
-          `Domínio Não Autorizado (${window.location.hostname}). Adicione este endereço no Console do Firebase > Auth > Configurações > Domínios Autorizados.`
-        );
+      const msg = error?.message || String(error);
+      if (error?.code === 'auth/invalid-credential' || error?.code === 'auth/user-not-found' || error?.code === 'auth/wrong-password') {
+         setAuthError("Email ou senha incorretos.");
+      } else if (error?.code === 'auth/email-already-in-use') {
+         setAuthError("Este email já está cadastrado.");
+      } else if (error?.code === 'auth/weak-password') {
+         setAuthError("A senha deve ter pelo menos 6 caracteres.");
+      } else if (error?.code === 'auth/invalid-email') {
+         setAuthError("O formato do email é inválido.");
       } else {
-        const msg = error?.message || String(error);
-        if (msg.includes('popup-blocked')) {
-          setAuthError("O navegador bloqueou o popup de login. Por favor, libere popups para este site e tente novamente.");
-        } else {
-          setAuthError(`Erro no login: ${msg}`);
-        }
+        setAuthError(`Erro no login: ${msg}`);
       }
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
@@ -127,76 +118,6 @@ export default function App() {
     setInvoices([]);
     setActiveInvoice(null);
     setViewMode('upload');
-  };
-
-  const handleParseFirebaseJson = (json: string) => {
-    setCustomFirebaseJson(json);
-    setCustomFbError(null);
-    if (!json.trim()) return;
-    try {
-      let cleaned = json.trim();
-      if (cleaned.includes('firebaseConfig = {') || cleaned.includes('{')) {
-        const firstBrace = cleaned.indexOf('{');
-        const lastBrace = cleaned.lastIndexOf('}');
-        if (firstBrace !== -1 && lastBrace !== -1) {
-          cleaned = cleaned.substring(firstBrace, lastBrace + 1);
-        }
-      }
-      
-      let parsedObj: any;
-      try {
-        parsedObj = JSON.parse(cleaned);
-      } catch (jsonErr) {
-        const fixedJson = cleaned
-          .replace(/'/g, '"')
-          .replace(/([a-zA-Z0-9_]+)\s*:/g, '"$1":')
-          .replace(/,\s*([}\]])/g, '$1');
-        parsedObj = JSON.parse(fixedJson);
-      }
-
-      if (parsedObj) {
-        if (parsedObj.apiKey) setCustomApiKey(parsedObj.apiKey);
-        if (parsedObj.authDomain) setCustomAuthDomain(parsedObj.authDomain);
-        if (parsedObj.projectId) setCustomProjectId(parsedObj.projectId);
-        if (parsedObj.storageBucket) setCustomStorageBucket(parsedObj.storageBucket);
-        if (parsedObj.messagingSenderId) setCustomMessagingSenderId(parsedObj.messagingSenderId);
-        if (parsedObj.appId) setCustomAppId(parsedObj.appId);
-        showToast("Configurações importadas!");
-      }
-    } catch (e) {
-      setCustomFbError("Formato inválido. Certifique-se de colar o bloco de configuração válido { apiKey: ... } ou digite manualmente.");
-    }
-  };
-
-  const handleSaveCustomFirebase = () => {
-    setCustomFbError(null);
-    if (!customApiKey.trim() || !customProjectId.trim()) {
-      setCustomFbError("Os campos API Key e Project ID são obrigatórios para inicializar o Firebase.");
-      return;
-    }
-
-    const config = {
-      apiKey: customApiKey.trim(),
-      authDomain: customAuthDomain.trim(),
-      projectId: customProjectId.trim(),
-      storageBucket: customStorageBucket.trim(),
-      messagingSenderId: customMessagingSenderId.trim(),
-      appId: customAppId.trim()
-    };
-
-    saveCustomFirebaseConfig(config);
-    showToast("Firebase Configurado! Reiniciando aplicação...");
-    setTimeout(() => {
-      window.location.reload();
-    }, 1200);
-  };
-
-  const handleResetFirebase = () => {
-    saveCustomFirebaseConfig(null);
-    showToast("Restaurando configuração nativa... Aguarde.");
-    setTimeout(() => {
-      window.location.reload();
-    }, 1200);
   };
 
   const showToast = (msg: string) => {
@@ -596,126 +517,61 @@ export default function App() {
           </div>
           <h1 className="text-2xl font-bold mb-2 bg-gradient-to-r from-gray-100 to-gray-400 bg-clip-text text-transparent">Nexus Faturas</h1>
           <p className="text-gray-400 text-center mb-8">Faça login para gerenciar e classificar suas faturas utilizando inteligência.</p>
-          <button 
-            onClick={handleLogin}
-            className="w-full py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-medium transition-colors cursor-pointer"
-          >
-            Entrar com Google
-          </button>
+          <form onSubmit={handleLogin} className="w-full space-y-4">
+            <div>
+              <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Email</label>
+              <input 
+                type="email" 
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="seu@email.com"
+                required
+                className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-sm text-gray-200 focus:outline-none focus:ring-2 focus:ring-purple-650 transition-all"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Senha</label>
+              <input 
+                type="password" 
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Sua senha"
+                required
+                className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-sm text-gray-200 focus:outline-none focus:ring-2 focus:ring-purple-650 transition-all"
+              />
+            </div>
+            
+            <button 
+              type="submit"
+              disabled={isLoggingIn}
+              className={`w-full py-3 mt-2 rounded-xl font-medium transition-colors cursor-pointer flex justify-center items-center ${isLoggingIn ? 'bg-purple-800 text-white/70 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700 text-white'}`}
+            >
+              {isLoggingIn ? (
+                <span className="flex items-center">
+                  <span className="w-4 h-4 border-2 border-white/50 border-t-white rounded-full animate-spin mr-2"></span>
+                  Autenticando...
+                </span>
+              ) : (
+                isSignUp ? "Criar Conta" : "Entrar"
+              )}
+            </button>
+          </form>
+
+          <div className="mt-4 text-center">
+            <button 
+              onClick={() => setIsSignUp(!isSignUp)}
+              className="text-xs text-purple-400 hover:text-purple-300 font-medium transition-colors bg-transparent border-none cursor-pointer"
+            >
+              {isSignUp ? "Já tenho uma conta. Quero entrar." : "Ainda não tenho conta. Criar agora."}
+            </button>
+          </div>
+
           {authError && (
             <div className="mt-6 p-4 rounded-xl bg-red-950/40 border border-red-900/60 text-red-200 text-xs leading-relaxed">
               <p className="font-semibold text-red-400 mb-1">⚠️ Status da Autenticação:</p>
               <p>{authError}</p>
-              {authError.includes("Domínio Não Autorizado") && (
-                <div className="mt-3 text-[11px] text-gray-400 space-y-1.5 pt-2 border-t border-red-900/40">
-                  <p className="text-red-300 font-semibold">Como resolver em 1 minuto:</p>
-                  <ol className="list-decimal pl-4 space-y-1">
-                    <li>Acesse o <a href="https://console.firebase.google.com/" target="_blank" rel="noopener noreferrer" className="text-purple-400 underline hover:text-purple-300">Console do Firebase</a> de seu projeto.</li>
-                    <li>No menu, clique em <strong>Authentication</strong>.</li>
-                    <li>Acesse a aba <strong>Settings</strong> (Configurações).</li>
-                    <li>Selecione <strong>Authorized domains</strong> (Domínios autorizados) no painel lateral/central.</li>
-                    <li>Clique em <strong>Add domain</strong> (Adicionar domínio) e insira: <code className="bg-gray-950 px-1 py-0.5 rounded text-red-300 font-mono select-all">{window.location.hostname}</code></li>
-                  </ol>
-                </div>
-              )}
             </div>
           )}
-
-          {/* Custom Firebase Settings Toggle */}
-          <div className="w-full mt-6 pt-6 border-t border-gray-800 flex flex-col items-center">
-            {usingCustomFb ? (
-              <div className="bg-purple-950/25 border border-purple-500/25 p-4 rounded-xl w-full text-center mb-1">
-                <p className="text-xs text-purple-300 font-semibold mb-1">🔥 Firebase Personalizado Ativo</p>
-                <p className="text-[11px] text-gray-400">Você está usando suas próprias credenciais do Firebase.</p>
-                <button
-                  onClick={handleResetFirebase}
-                  className="mt-3 text-xs text-red-400 hover:text-red-300 underline font-medium cursor-pointer bg-transparent border-none p-0"
-                >
-                  Restaurar Original / Padrão
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => setShowFirebaseSettings(!showFirebaseSettings)}
-                className="text-xs text-gray-500 hover:text-purple-400 transition-colors flex items-center gap-1.5 cursor-pointer font-medium bg-transparent border-none p-0"
-              >
-                <FileStack className="w-3.5 h-3.5 text-purple-500" />
-                Configurar meu próprio Firebase (Avançado / Netlify)
-              </button>
-            )}
-
-            {showFirebaseSettings && !usingCustomFb && (
-              <div className="w-full mt-4 p-4 rounded-xl bg-gray-950 border border-gray-800 text-left space-y-4 animate-in slide-in-from-top-4 duration-200">
-                <div>
-                  <h4 className="text-xs font-bold text-gray-300 uppercase tracking-wider">Firebase Próprio</h4>
-                  <p className="text-[10px] text-gray-500 mt-1">
-                    Útil se você publicou o app no seu Netlify e não tem permissões no projeto Firebase gerado pelo AI Studio para adicionar o domínio.
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="block text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Colar bloco de código JSON do Config:</label>
-                  <textarea
-                    rows={4}
-                    value={customFirebaseJson}
-                    onChange={(e) => handleParseFirebaseJson(e.target.value)}
-                    placeholder={`const firebaseConfig = {\n  apiKey: "AIzaSy...",\n  authDomain: "...",\n  projectId: "..."\n};`}
-                    className="w-full bg-gray-900 border border-gray-800 rounded-lg p-2 text-xs font-mono text-gray-300 focus:outline-none focus:ring-1 focus:ring-purple-600 focus:border-transparent"
-                  />
-                  <p className="text-[9px] text-gray-500">Cole o código do Firebase Console para preencher tudo automaticamente.</p>
-                </div>
-
-                {customFbError && (
-                  <p className="text-[10px] text-red-400 leading-relaxed font-medium bg-red-950/20 p-2 rounded border border-red-900/30">{customFbError}</p>
-                )}
-
-                <div className="grid grid-cols-2 gap-2 text-left">
-                  <div className="col-span-2">
-                    <label className="block text-[9px] font-semibold text-gray-500 uppercase">API Key *</label>
-                    <input
-                      type="text"
-                      value={customApiKey}
-                      onChange={(e) => setCustomApiKey(e.target.value)}
-                      className="w-full bg-gray-900 border border-gray-800 rounded-lg py-1 px-2 text-xs text-gray-300 focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[9px] font-semibold text-gray-500 uppercase">Project ID *</label>
-                    <input
-                      type="text"
-                      value={customProjectId}
-                      onChange={(e) => setCustomProjectId(e.target.value)}
-                      className="w-full bg-gray-900 border border-gray-800 rounded-lg py-1 px-2 text-xs text-gray-300 focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[9px] font-semibold text-gray-500 uppercase">Auth Domain</label>
-                    <input
-                      type="text"
-                      value={customAuthDomain}
-                      onChange={(e) => setCustomAuthDomain(e.target.value)}
-                      className="w-full bg-gray-900 border border-gray-800 rounded-lg py-1 px-2 text-xs text-gray-300 focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                <div className="flex gap-2 pt-1">
-                  <button
-                    onClick={() => setShowFirebaseSettings(false)}
-                    className="w-1/2 py-2 bg-gray-900 hover:bg-gray-800 text-gray-455 rounded-lg text-xs font-medium cursor-pointer border-none"
-                  >
-                    Fechar
-                  </button>
-                  <button
-                    onClick={handleSaveCustomFirebase}
-                    className="w-1/2 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-medium cursor-pointer border-none shadow-md"
-                  >
-                    Salvar e Reiniciar
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
         </div>
       </div>
     );
